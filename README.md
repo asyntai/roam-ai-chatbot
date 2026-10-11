@@ -25,7 +25,8 @@ place is sent with every page that references it.
 
 ## Install
 
-1. Install **Asyntai AI Chatbot** from Roam Depot.
+1. In Roam, open **Settings**, go to the **Roam Depot** tab, press **Browse**,
+   and install **Asyntai AI Chatbot**.
 2. Sign in at [asyntai.com](https://asyntai.com), open **Settings → API**, and
    copy your API key.
 3. In Roam, open **Settings → Asyntai AI Chatbot** and paste the key.
