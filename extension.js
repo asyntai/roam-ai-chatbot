@@ -975,7 +975,8 @@ var transport = async (req) => {
 function questionFromBlock(text, indexes) {
   let value = text || "";
   if (Array.isArray(indexes) && indexes.length === 2 && indexes[0] <= indexes[1] && indexes[1] <= value.length) {
-    value = value.slice(0, indexes[0]) + value.slice(indexes[1]);
+    const start = value[indexes[0] - 1] === "/" ? indexes[0] - 1 : indexes[0];
+    value = value.slice(0, start) + value.slice(indexes[1]);
   } else {
     value = value.replace(/\/[^/\n]*$/, "");
   }

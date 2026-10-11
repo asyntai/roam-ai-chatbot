@@ -245,7 +245,11 @@ test("the sync map survives a round trip and a damaged value", () => {
 test("questionFromBlock cuts the slash command", () => {
     assert.equal(questionFromBlock("Do we ship to Spain? /Asyntai ask"), "Do we ship to Spain?");
     assert.equal(questionFromBlock("Do we ship to Spain? /asy"), "Do we ship to Spain?");
-    assert.equal(questionFromBlock("Is it a/b test? /asy", [16, 20]), "Is it a/b test?");
+    // Roam's indexes cover the search text after the "/".
+    const text = "Is it a/b test? /Asyntai ask";
+    assert.equal(questionFromBlock(text, [17, text.length]), "Is it a/b test?");
+    // A span that starts at the "/" works too.
+    assert.equal(questionFromBlock(text, [16, text.length]), "Is it a/b test?");
     assert.equal(questionFromBlock("/Asyntai ask"), "");
 });
 

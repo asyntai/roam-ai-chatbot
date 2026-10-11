@@ -66,7 +66,11 @@ const transport: Transport = async (req: TransportRequest) => {
 export function questionFromBlock(text: string, indexes?: [number, number]): string {
     let value = text || "";
     if (Array.isArray(indexes) && indexes.length === 2 && indexes[0] <= indexes[1] && indexes[1] <= value.length) {
-        value = value.slice(0, indexes[0]) + value.slice(indexes[1]);
+        // Roam's indexes cover the typed search text AFTER the "/" (seen in
+        // real Roam: "there? /Asyntai ask" left "there? /"), so the slash
+        // right before the span goes too.
+        const start = value[indexes[0] - 1] === "/" ? indexes[0] - 1 : indexes[0];
+        value = value.slice(0, start) + value.slice(indexes[1]);
     } else {
         value = value.replace(/\/[^/\n]*$/, "");
     }
