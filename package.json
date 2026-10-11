@@ -1,0 +1,20 @@
+{
+  "name": "roam-ai-chatbot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Roam Research extension: send your Roam pages to the Asyntai AI chatbot knowledge base, ask questions about them, and read website chats and leads.",
+  "scripts": {
+    "build": "tsc --noEmit && node build.mjs",
+    "test": "node build.mjs test && node --test tests/unit.test.mjs tests/graph.test.mjs"
+  },
+  "author": "Asyntai <hello@asyntai.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "datascript": "1.2.10",
+    "esbuild": "0.25.12",
+    "typescript": "5.6.3"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}

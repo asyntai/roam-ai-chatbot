@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Roam harness</title>
+    <style>
+        body { font-family: sans-serif; margin: 0; background: #f5f8fa; }
+        .rm-topbar { height: 45px; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: #fff;
+            border-bottom: 1px solid #ddd; }
+        .roam-main { padding: 24px 40px; }
+        .bp3-button { display: inline-block; padding: 4px 8px; border: 1px solid #ccc; border-radius: 3px; cursor: pointer; }
+        .bp3-icon-chat::before { content: "💬"; }
+        textarea.rm-block-input { width: 600px; font-size: 15px; }
+    </style>
+</head>
+<body>
+    <div class="rm-topbar"><span class="rm-topbar__spacer-sm"></span><b>Roam (test harness)</b></div>
+    <div class="roam-main">
+        <h1 id="page-title">Docs/Refund policy</h1>
+        <textarea id="block" class="rm-block-input" rows="2"></textarea>
+    </div>
+    <script src="../build/harness.js"></script>
+</body>
+</html>
