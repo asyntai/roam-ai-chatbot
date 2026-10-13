@@ -21,7 +21,8 @@ numbers visitors left in the chat, newest first.
 **Stay in step.** Edit a page and it goes up again a few seconds after you stop
 typing. Rename it out of your chosen pages, or delete it, and Asyntai follows.
 Block references are sent as the text they point to, so a fact kept in one
-place is sent with every page that references it.
+place is sent with every page that references it. A reference into a page you
+leave out, or into a daily note while daily notes are off, sends nothing.
 
 ## Install
 
@@ -30,9 +31,11 @@ place is sent with every page that references it.
 2. Sign in at [asyntai.com](https://asyntai.com), open **Settings → API**, and
    copy your API key.
 3. In Roam, open **Settings → Asyntai AI Chatbot** and paste the key.
-4. Put the pages you want to send in **Pages to send**, comma separated. `Docs`
-   sends `Docs` and every page under it, such as `Docs/Refund policy`. Type `/`
-   to send every page. An empty box sends nothing.
+4. Put the pages you want to send in **Pages to send**, comma separated. These
+   are the pages your Asyntai chatbot answers from, on your website and in the
+   panel. `Docs` sends `Docs` and every page under it, such as
+   `Docs/Refund policy`. Type `/` to send every page. An empty box sends
+   nothing.
 5. Run **Asyntai: send all pages** from the command palette (Ctrl+P, or Cmd+P
    on a Mac).
 
@@ -55,11 +58,11 @@ text as the question. The button in the top bar opens the panel too.
 | Setting | Meaning |
 | --- | --- |
 | Asyntai API key | From Settings → API in your Asyntai dashboard |
-| Pages to send | Page title prefixes to send. `/` means every page |
-| Pages to leave out | Prefixes that stay out even when a parent is sent |
+| Pages to send | The pages your chatbot answers from, on your website and in the panel. Title prefixes; `/` means every page |
+| Pages to leave out | Prefixes that stay out even when a parent is sent, block references into them included |
 | Send daily notes | Off by default, because daily notes are usually private |
 | Send changes automatically | Sends a page a few seconds after you stop typing |
-| Asyntai address | Leave as it is unless support asks you to change it |
+| Asyntai address | Leave as it is unless support asks you to change it. Must start with `https://` |
 
 ## Requirements
 

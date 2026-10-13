@@ -80,6 +80,15 @@ export function isOwnQuestion(sessionId: string): boolean {
     return typeof sessionId === "string" && sessionId.includes(ASK_MARKER);
 }
 
+/**
+ * The API key and the page text go to this address, so only https is
+ * accepted. Plain http is allowed for localhost and 127.0.0.1 only, which
+ * never leaves the machine (used by the test suite).
+ */
+export function isSafeOrigin(origin: string): boolean {
+    return /^https:\/\/[^\s/]+/i.test(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+}
+
 function query(params: Record<string, string | number | undefined>): string {
     const search = new URLSearchParams();
     for (const name of Object.keys(params)) {
@@ -112,8 +121,12 @@ export class AsyntaiApi {
             Authorization: `Bearer ${key}`,
             Accept: "application/json",
         };
+        const origin = this.origin().trim().replace(/\/+$/, "");
+        if (!isSafeOrigin(origin)) {
+            throw new ApiError("The Asyntai address must start with https://.", 0);
+        }
         const req: TransportRequest = {
-            url: this.origin().replace(/\/+$/, "") + path,
+            url: origin + path,
             method,
             headers,
         };

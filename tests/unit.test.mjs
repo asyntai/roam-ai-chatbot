@@ -2,10 +2,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { roamToText, flattenBlocks, pageText, blockRefs, resolveBlockRefs, hashText } from "./build/text.js";
-import { SyncEngine, shouldSync, parseNamespaces, MIN_LENGTH } from "./build/sync.js";
-import { AsyntaiApi, isOwnQuestion, newAskSession } from "./build/api.js";
+import { SyncEngine, shouldSync, parseNamespaces, refAllowed, MIN_LENGTH } from "./build/sync.js";
+import { AsyntaiApi, isOwnQuestion, newAskSession, isSafeOrigin } from "./build/api.js";
 import { parseMap, serializeMap } from "./build/store.js";
-import { chatTitle } from "./build/ui.js";
+import { chatTitle, plainForRoam } from "./build/ui.js";
 import { questionFromBlock, pages } from "./build/index.js";
 
 test("page links, tags and aliases keep their words", () => {
@@ -267,4 +267,68 @@ test("page counts read correctly", () => {
     assert.equal(pages(0), "0 pages");
     assert.equal(pages(1), "1 page");
     assert.equal(pages(4), "4 pages");
+});
+
+test("an unchanged page writes nothing to the settings", async () => {
+    const page = { uid: "pg1", title: "Docs/Refund", blocks: [{ string: LONG, order: 0 }] };
+    const { engine, saved } = engineWith([page]);
+    await engine.push(page);
+    assert.equal(saved.length, 1);
+    await engine.push(page);
+    await engine.push(page);
+    assert.equal(saved.length, 1, "no save for unchanged pushes");
+});
+
+test("send all and remove all save the map once each", async () => {
+    const pages = ["a", "b", "c", "d"].map((uid) => ({ uid, title: `Docs/${uid}`, blocks: [{ string: LONG, order: 0 }] }));
+    const { engine, saved, server } = engineWith(pages);
+    await engine.syncAll();
+    assert.equal(server.entries.size, 4);
+    assert.equal(saved.length, 1, "one save for the whole run");
+    assert.equal(Object.keys(saved[0]).length, 4);
+    await engine.removeAll();
+    assert.equal(saved.length, 2);
+    assert.deepEqual(saved[1], {});
+});
+
+test("a bulk run that breaks half way still saves what it sent", async () => {
+    const pages = [
+        { uid: "a", title: "Docs/A", blocks: [{ string: LONG, order: 0 }] },
+        { uid: "b", title: "Docs/B", get blocks() { throw new Error("graph read failed"); } },
+    ];
+    const { engine, saved, server } = engineWith(pages);
+    await assert.rejects(engine.syncAll(), /graph read failed/);
+    assert.equal(server.entries.size, 1);
+    assert.equal(saved.length, 1, "saved once, in the finally");
+    assert.ok(saved[0].a && saved[0].a.kb);
+});
+
+test("refAllowed: left-out pages and daily notes only", () => {
+    const opts = { namespaces: ["docs"], excluded: ["private"], journals: false };
+    assert.equal(refAllowed({ uid: "x", title: "Private/Pay", journal: false }, opts), false);
+    assert.equal(refAllowed({ uid: "10-11-2026", title: "October 11th, 2026", journal: true }, opts), false);
+    assert.equal(refAllowed({ uid: "10-11-2026", title: "October 11th, 2026", journal: true }, { ...opts, journals: true }), true);
+    assert.equal(refAllowed({ uid: "y", title: "Not sent at all", journal: false }, opts), true);
+});
+
+test("plainForRoam turns visitor markup into plain words", () => {
+    assert.equal(plainForRoam("see [[Pricing]] and #urgent and #[[big deal]]"), "see [Pricing] and urgent and [big deal]");
+    assert.equal(plainForRoam("{{embed: ((abcdefghi))}}"), "{embed: (abcdefghi)}");
+    assert.equal(plainForRoam("Price:: 0"), "Price: 0");
+    assert.equal(plainForRoam("C# and a#b stay"), "C# and a#b stay");
+    assert.ok(!/\[\[|\]\]|\(\(|\)\)|\{\{|\}\}|::/.test(plainForRoam("[[a]] ((b)) {{c}} d::e")));
+});
+
+test("only https, or plain http on this machine", async () => {
+    assert.ok(isSafeOrigin("https://asyntai.com"));
+    assert.ok(isSafeOrigin("http://127.0.0.1:8074"));
+    assert.ok(isSafeOrigin("http://localhost:8000"));
+    assert.ok(!isSafeOrigin("http://asyntai.com"));
+    assert.ok(!isSafeOrigin("http://127.0.0.1.evil.example"));
+    assert.ok(!isSafeOrigin("ftp://asyntai.com"));
+    assert.ok(!isSafeOrigin(""));
+    let called = false;
+    const api = new AsyntaiApi(async () => { called = true; return { status: 200, text: "{}" }; }, () => "key-ok", () => "http://evil.example");
+    await assert.rejects(api.account(), /must start with https:\/\//);
+    assert.equal(called, false, "the key never leaves");
 });

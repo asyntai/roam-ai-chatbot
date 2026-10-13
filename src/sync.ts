@@ -110,12 +110,33 @@ export function shouldSync(page: GraphPage, options: SyncOptions): boolean {
     return namespaces.some((namespace) => inNamespace(name, namespace));
 }
 
+/**
+ * Whether the text of a block on this page may be sent inside another page,
+ * through a ((block reference)). Left-out pages and, while daily notes are
+ * off, daily notes stay out; any other page is fine, sent or not.
+ */
+export function refAllowed(page: GraphPage, options: SyncOptions): boolean {
+    const name = (page.title || "").trim().toLowerCase();
+    if (page.journal && !options.journals) {
+        return false;
+    }
+    for (const excluded of options.excluded) {
+        if (excluded !== "" && inNamespace(name, excluded)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 export class SyncEngine {
     private api: AsyntaiApi;
     private graph: GraphLike;
     private map: SyncMap;
     private save: (map: SyncMap) => Promise<void>;
     private options: () => SyncOptions;
+    // Inside "send all" and "remove all" the map is saved once at the end:
+    // on a big graph it is a large string, and one write per page adds up.
+    private batching = false;
     // Every write runs one at a time. Two runs side by side (the watcher
     // during "send all", or "send all" pressed twice) both saw a page as
     // unsent and both added it, so Asyntai held the page twice.
@@ -147,9 +168,21 @@ export class SyncEngine {
         return Boolean(this.map[uid]?.kb);
     }
 
-    /** When a page was last sent, 0 if never. */
-    sentAt(uid: string): number {
-        return this.map[uid]?.sent || 0;
+    private async persist(): Promise<void> {
+        if (!this.batching) {
+            await this.save(this.map);
+        }
+    }
+
+    /** Runs a bulk job with one save at the end, even if the job fails. */
+    private async batch<T>(work: () => Promise<T>): Promise<T> {
+        this.batching = true;
+        try {
+            return await work();
+        } finally {
+            this.batching = false;
+            await this.save(this.map);
+        }
     }
 
     wanted(page: GraphPage): boolean {
@@ -189,10 +222,6 @@ export class SyncEngine {
         const hash = hashText(body);
         const known = this.map[page.uid];
         if (known && known.hash === hash && known.kb) {
-            // Unchanged, but the edit time still moved: remember it, so the
-            // watcher does not look at this page again until it is edited.
-            known.sent = Date.now();
-            await this.save(this.map);
             return { ok: true, skipped: true, message: "Page is unchanged." };
         }
 
@@ -205,7 +234,7 @@ export class SyncEngine {
 
         const old = known?.kb;
         this.map[page.uid] = { kb, hash, sent: Date.now(), title: parsed.title };
-        await this.save(this.map);
+        await this.persist();
 
         if (old && old !== kb) {
             try {
@@ -228,13 +257,13 @@ export class SyncEngine {
             return false;
         }
         delete this.map[uid];
-        await this.save(this.map);
+        await this.persist();
         return true;
     }
 
     /** Send every wanted page and remove every page that is no longer wanted. */
     syncAll(onProgress?: (done: number, total: number) => void): Promise<SyncAllResult> {
-        return this.exclusive(() => this.syncAllNow(onProgress));
+        return this.exclusive(() => this.batch(() => this.syncAllNow(onProgress)));
     }
 
     private async syncAllNow(onProgress?: (done: number, total: number) => void): Promise<SyncAllResult> {
@@ -275,15 +304,17 @@ export class SyncEngine {
 
     /** Remove every synced page from the knowledge base. */
     removeAll(): Promise<number> {
-        return this.exclusive(async () => {
-            let removed = 0;
-            for (const uid of Object.keys(this.map)) {
-                if (await this.removeNow(uid)) {
-                    removed += 1;
+        return this.exclusive(() =>
+            this.batch(async () => {
+                let removed = 0;
+                for (const uid of Object.keys(this.map)) {
+                    if (await this.removeNow(uid)) {
+                        removed += 1;
+                    }
                 }
-            }
-            return removed;
-        });
+                return removed;
+            }),
+        );
     }
 }
 

@@ -70,6 +70,8 @@ const REF_DEPTH = 3;
 
 export class RoamGraph implements GraphLike {
     private alpha: RoamAlpha;
+    /** Which pages a referenced block may come from. Unset: any page. */
+    refFilter?: (page: GraphPage) => boolean;
 
     constructor(alpha: RoamAlpha) {
         this.alpha = alpha;
@@ -103,23 +105,23 @@ export class RoamGraph implements GraphLike {
         return { uid, title, journal: isJournalUid(uid) };
     }
 
-    /** The newest edit time of every page: the page itself or any block on it. */
+    /**
+     * The last change time of every page. Roam stamps :page/edit-time on the
+     * page whenever anything on it changes, deletions and moves included, so
+     * one datom per page is enough. A block-level max missed deletions: the
+     * deleted block takes its own :edit/time with it. Pages Roam has not
+     * backfilled yet are absent here; "send all pages" still covers them.
+     */
     async editTimes(): Promise<Record<string, number>> {
         const out: Record<string, number> = {};
-        const note = (rows: unknown): void => {
-            for (const row of (rows as Array<[string, number]>) || []) {
-                const [uid, time] = row;
-                if (uid && typeof time === "number" && time > (out[uid] || 0)) {
-                    out[uid] = time;
-                }
+        const rows = (await this.q("[:find ?uid ?t :where [?p :page/edit-time ?t] [?p :block/uid ?uid]]")) as Array<
+            [string, number]
+        >;
+        for (const [uid, time] of rows || []) {
+            if (uid && typeof time === "number") {
+                out[uid] = time;
             }
-        };
-        note(
-            await this.q(
-                "[:find ?uid (max ?t) :where [?p :node/title] [?p :block/uid ?uid] [?b :block/page ?p] [?b :edit/time ?t]]",
-            ),
-        );
-        note(await this.q("[:find ?uid ?t :where [?p :node/title] [?p :block/uid ?uid] [?p :edit/time ?t]]"));
+        }
         return out;
     }
 
@@ -142,7 +144,21 @@ export class RoamGraph implements GraphLike {
             for (const ref of wanted) {
                 let text = "";
                 try {
-                    text = field<string>(await this.pull("[:block/string]", [":block/uid", ref]), "block/string") || "";
+                    const entity = await this.pull("[:block/string {:block/page [:block/uid :node/title]}]", [
+                        ":block/uid",
+                        ref,
+                    ]);
+                    text = field<string>(entity, "block/string") || "";
+                    const page = field<Pulled>(entity, "block/page");
+                    const pageUid = field<string>(page, "block/uid");
+                    const pageTitle = field<string>(page, "node/title");
+                    if (
+                        this.refFilter &&
+                        pageUid &&
+                        !this.refFilter({ uid: pageUid, title: pageTitle || "", journal: isJournalUid(pageUid) })
+                    ) {
+                        text = "";
+                    }
                 } catch {
                     text = "";
                 }

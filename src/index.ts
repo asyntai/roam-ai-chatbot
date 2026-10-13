@@ -5,7 +5,7 @@ import { AsyntaiApi, DEFAULT_ORIGIN, Transport, TransportRequest } from "./api";
 import { RoamAlpha, RoamGraph } from "./graph";
 import { MAP_KEY, parseMap, serializeMap } from "./store";
 import { CSS, STYLE_ID } from "./styles";
-import { SyncEngine, SyncMap, SyncOptions, errorText, parseNamespaces } from "./sync";
+import { SyncEngine, SyncMap, SyncOptions, errorText, parseNamespaces, refAllowed } from "./sync";
 import { Panel } from "./ui";
 
 /** The parts of Roam's extensionAPI this extension uses. */
@@ -157,20 +157,25 @@ async function onload({ extensionAPI }: { extensionAPI: ExtensionAPI }): Promise
                     id: KEY.namespaces,
                     name: "Pages to send",
                     description:
-                        'Page title prefixes, comma separated, for example "Docs" sends "Docs/Refund policy". ' +
+                        "Pages the Asyntai chatbot answers from, on your website and in this panel. " +
+                        'Page title prefixes, comma separated: "Docs" sends "Docs" and "Docs/Refund policy". ' +
                         'Type "/" to send every page. Empty sends nothing.',
                     action: { type: "input", placeholder: "Docs, Help center" },
                 },
                 {
                     id: KEY.excluded,
                     name: "Pages to leave out",
-                    description: "Prefixes that stay out even when a parent is sent.",
+                    description:
+                        "Prefixes that stay out even when a parent is sent. A block reference to a block on one of " +
+                        "these pages is left out of the sent text too.",
                     action: { type: "input", placeholder: "Docs/Drafts" },
                 },
                 {
                     id: KEY.journals,
                     name: "Send daily notes",
-                    description: "Daily notes are usually private, so they stay out unless you turn this on.",
+                    description:
+                        "Daily notes are usually private, so they stay out unless you turn this on. While it is off, " +
+                        "a block reference to a daily note is left out of the sent text too.",
                     action: { type: "switch" },
                 },
                 {
@@ -182,7 +187,7 @@ async function onload({ extensionAPI }: { extensionAPI: ExtensionAPI }): Promise
                 {
                     id: KEY.origin,
                     name: "Asyntai address",
-                    description: "Leave this as it is unless Asyntai support asks you to change it.",
+                    description: "Leave this as it is unless Asyntai support asks you to change it. Must start with https://.",
                     action: { type: "input", placeholder: DEFAULT_ORIGIN },
                 },
             ],
@@ -200,6 +205,9 @@ async function onload({ extensionAPI }: { extensionAPI: ExtensionAPI }): Promise
         await Promise.resolve(settings.set(MAP_KEY, serializeMap(map)));
     };
     const engine = new SyncEngine(api, graph, parseMap(settings.get(MAP_KEY)), saveMap, options);
+    // "Pages to leave out" and the daily notes switch hold for block
+    // references too: a ((ref)) into a left-out page sends nothing.
+    graph.refFilter = (page) => refAllowed(page, options());
 
     // Styles and the panel.
     const style = document.createElement("style");
@@ -295,8 +303,15 @@ async function onload({ extensionAPI }: { extensionAPI: ExtensionAPI }): Promise
         bar.appendChild(button);
         return true;
     };
-    // The top bar is re-rendered when the left sidebar opens or closes.
-    const barTimer = setInterval(placeButton, 2000);
+    // Roam re-renders the top bar, for example when the left sidebar opens or
+    // closes, which drops the button. Put it back whenever the page changes
+    // and it is missing; the check is one property read.
+    const barObserver = new MutationObserver(() => {
+        if (!button.isConnected) {
+            placeButton();
+        }
+    });
+    barObserver.observe(document.body, { childList: true, subtree: true });
     placeButton();
 
     // Commands.
@@ -381,9 +396,13 @@ async function onload({ extensionAPI }: { extensionAPI: ExtensionAPI }): Promise
     );
 
     // Auto sync. Roam has no "something changed" event for the whole graph,
-    // so the newest edit time per page is read on a timer. A page is sent
-    // once it was edited after it was last sent and its writer paused.
+    // so each page's :page/edit-time is read on a timer. A page is handled
+    // once it changed after the last time it was handled (or after the
+    // extension started) and its writer paused. The handled times live in
+    // memory only, so nothing is written to the settings for a page that did
+    // not change.
     const startedAt = Date.now();
+    const handled: Record<string, number> = {};
     let busy = false;
     const tick = async (): Promise<void> => {
         if (busy || !flag(KEY.autoSync, true) || !text(KEY.apiKey).trim()) {
@@ -399,18 +418,23 @@ async function onload({ extensionAPI }: { extensionAPI: ExtensionAPI }): Promise
             const times = await graph.editTimes();
             const now = Date.now();
             for (const [uid, edited] of Object.entries(times)) {
-                if (edited <= Math.max(engine.sentAt(uid), startedAt) || now - edited < QUIET_MS) {
+                if (edited <= (handled[uid] ?? startedAt) || now - edited < QUIET_MS) {
                     continue;
                 }
                 const page = await graph.page(uid);
                 if (!page) {
                     continue;
                 }
+                let ok = true;
                 if (engine.wanted(page)) {
-                    await engine.push(page);
+                    ok = (await engine.push(page)).ok;
                 } else if (engine.isSynced(uid)) {
-                    // Renamed out of the namespaces.
-                    await engine.remove(uid);
+                    // Renamed out of the chosen pages.
+                    ok = await engine.remove(uid);
+                }
+                // A failed send is tried again on the next check.
+                if (ok) {
+                    handled[uid] = edited;
                 }
             }
             // Deleted pages.
@@ -430,7 +454,7 @@ async function onload({ extensionAPI }: { extensionAPI: ExtensionAPI }): Promise
     runtime = {
         stop: () => {
             clearInterval(watchTimer);
-            clearInterval(barTimer);
+            barObserver.disconnect();
             document.removeEventListener("keydown", onKey);
             button.remove();
             spacer.remove();

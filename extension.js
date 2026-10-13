@@ -13,6 +13,9 @@ function newAskSession() {
 function isOwnQuestion(sessionId) {
   return typeof sessionId === "string" && sessionId.includes(ASK_MARKER);
 }
+function isSafeOrigin(origin) {
+  return /^https:\/\/[^\s/]+/i.test(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+}
 function query(params) {
   const search = new URLSearchParams();
   for (const name of Object.keys(params)) {
@@ -39,8 +42,12 @@ var AsyntaiApi = class {
       Authorization: `Bearer ${key}`,
       Accept: "application/json"
     };
+    const origin = this.origin().trim().replace(/\/+$/, "");
+    if (!isSafeOrigin(origin)) {
+      throw new ApiError("The Asyntai address must start with https://.", 0);
+    }
     const req = {
-      url: this.origin().replace(/\/+$/, "") + path,
+      url: origin + path,
       method,
       headers
     };
@@ -294,23 +301,21 @@ var RoamGraph = class {
     }
     return { uid, title, journal: isJournalUid(uid) };
   }
-  /** The newest edit time of every page: the page itself or any block on it. */
+  /**
+   * The last change time of every page. Roam stamps :page/edit-time on the
+   * page whenever anything on it changes, deletions and moves included, so
+   * one datom per page is enough. A block-level max missed deletions: the
+   * deleted block takes its own :edit/time with it. Pages Roam has not
+   * backfilled yet are absent here; "send all pages" still covers them.
+   */
   async editTimes() {
     const out = {};
-    const note = (rows) => {
-      for (const row of rows || []) {
-        const [uid, time] = row;
-        if (uid && typeof time === "number" && time > (out[uid] || 0)) {
-          out[uid] = time;
-        }
+    const rows = await this.q("[:find ?uid ?t :where [?p :page/edit-time ?t] [?p :block/uid ?uid]]");
+    for (const [uid, time] of rows || []) {
+      if (uid && typeof time === "number") {
+        out[uid] = time;
       }
-    };
-    note(
-      await this.q(
-        "[:find ?uid (max ?t) :where [?p :node/title] [?p :block/uid ?uid] [?b :block/page ?p] [?b :edit/time ?t]]"
-      )
-    );
-    note(await this.q("[:find ?uid ?t :where [?p :node/title] [?p :block/uid ?uid] [?p :edit/time ?t]]"));
+    }
     return out;
   }
   async blocks(uid) {
@@ -329,7 +334,17 @@ var RoamGraph = class {
       for (const ref of wanted) {
         let text = "";
         try {
-          text = field(await this.pull("[:block/string]", [":block/uid", ref]), "block/string") || "";
+          const entity = await this.pull("[:block/string {:block/page [:block/uid :node/title]}]", [
+            ":block/uid",
+            ref
+          ]);
+          text = field(entity, "block/string") || "";
+          const page = field(entity, "block/page");
+          const pageUid = field(page, "block/uid");
+          const pageTitle = field(page, "node/title");
+          if (this.refFilter && pageUid && !this.refFilter({ uid: pageUid, title: pageTitle || "", journal: isJournalUid(pageUid) })) {
+            text = "";
+          }
         } catch {
           text = "";
         }
@@ -546,8 +561,23 @@ function shouldSync(page, options) {
   }
   return namespaces.some((namespace) => inNamespace(name, namespace));
 }
+function refAllowed(page, options) {
+  const name = (page.title || "").trim().toLowerCase();
+  if (page.journal && !options.journals) {
+    return false;
+  }
+  for (const excluded of options.excluded) {
+    if (excluded !== "" && inNamespace(name, excluded)) {
+      return false;
+    }
+  }
+  return true;
+}
 var SyncEngine = class {
   constructor(api, graph, map, save, options) {
+    // Inside "send all" and "remove all" the map is saved once at the end:
+    // on a big graph it is a large string, and one write per page adds up.
+    this.batching = false;
     // Every write runs one at a time. Two runs side by side (the watcher
     // during "send all", or "send all" pressed twice) both saw a page as
     // unsent and both added it, so Asyntai held the page twice.
@@ -567,9 +597,20 @@ var SyncEngine = class {
   isSynced(uid) {
     return Boolean(this.map[uid]?.kb);
   }
-  /** When a page was last sent, 0 if never. */
-  sentAt(uid) {
-    return this.map[uid]?.sent || 0;
+  async persist() {
+    if (!this.batching) {
+      await this.save(this.map);
+    }
+  }
+  /** Runs a bulk job with one save at the end, even if the job fails. */
+  async batch(work) {
+    this.batching = true;
+    try {
+      return await work();
+    } finally {
+      this.batching = false;
+      await this.save(this.map);
+    }
   }
   wanted(page) {
     return shouldSync(page, this.options());
@@ -602,8 +643,6 @@ var SyncEngine = class {
     const hash = hashText(body);
     const known = this.map[page.uid];
     if (known && known.hash === hash && known.kb) {
-      known.sent = Date.now();
-      await this.save(this.map);
       return { ok: true, skipped: true, message: "Page is unchanged." };
     }
     let kb;
@@ -614,7 +653,7 @@ var SyncEngine = class {
     }
     const old = known?.kb;
     this.map[page.uid] = { kb, hash, sent: Date.now(), title: parsed.title };
-    await this.save(this.map);
+    await this.persist();
     if (old && old !== kb) {
       try {
         await this.api.deleteEntry(old);
@@ -634,12 +673,12 @@ var SyncEngine = class {
       return false;
     }
     delete this.map[uid];
-    await this.save(this.map);
+    await this.persist();
     return true;
   }
   /** Send every wanted page and remove every page that is no longer wanted. */
   syncAll(onProgress) {
-    return this.exclusive(() => this.syncAllNow(onProgress));
+    return this.exclusive(() => this.batch(() => this.syncAllNow(onProgress)));
   }
   async syncAllNow(onProgress) {
     const result = { sent: 0, skipped: 0, removed: 0, failed: 0, errors: [] };
@@ -675,15 +714,17 @@ var SyncEngine = class {
   }
   /** Remove every synced page from the knowledge base. */
   removeAll() {
-    return this.exclusive(async () => {
-      let removed = 0;
-      for (const uid of Object.keys(this.map)) {
-        if (await this.removeNow(uid)) {
-          removed += 1;
+    return this.exclusive(
+      () => this.batch(async () => {
+        let removed = 0;
+        for (const uid of Object.keys(this.map)) {
+          if (await this.removeNow(uid)) {
+            removed += 1;
+          }
         }
-      }
-      return removed;
-    });
+        return removed;
+      })
+    );
   }
 };
 function errorText(err) {
@@ -706,6 +747,9 @@ function el(tag, className, text) {
     node.textContent = text;
   }
   return node;
+}
+function plainForRoam(text) {
+  return (text || "").replace(/\[\[|\]\]/g, (pair) => pair[0]).replace(/\(\(|\)\)/g, (pair) => pair[0]).replace(/\{\{|\}\}/g, (pair) => pair[0]).replace(/(^|[^\w])#(?=[\w[])/g, "$1").replace(/::/g, ":");
 }
 function chatTitle(session) {
   const date = (session.first_message_at || session.last_message_at || "").slice(0, 10);
@@ -905,7 +949,7 @@ var Panel = class {
     const save = el("button", "asyntai-link", "Save as page");
     save.title = "Saved chats go under Asyntai chats/ and are never sent back to Asyntai.";
     save.addEventListener("click", () => {
-      const lines = messages.map((m) => `${m.role === "user" ? "Visitor" : "Asyntai"}: ${m.content}`);
+      const lines = messages.map((m) => `${m.role === "user" ? "Visitor" : "Asyntai"}: ${plainForRoam(m.content)}`);
       const title = `Asyntai chats/${chatTitle(session)}`;
       void this.hooks.saveAsPage(title, lines.join("\n"));
     });
@@ -1039,19 +1083,19 @@ async function onload({ extensionAPI }) {
         {
           id: KEY.namespaces,
           name: "Pages to send",
-          description: 'Page title prefixes, comma separated, for example "Docs" sends "Docs/Refund policy". Type "/" to send every page. Empty sends nothing.',
+          description: 'Pages the Asyntai chatbot answers from, on your website and in this panel. Page title prefixes, comma separated: "Docs" sends "Docs" and "Docs/Refund policy". Type "/" to send every page. Empty sends nothing.',
           action: { type: "input", placeholder: "Docs, Help center" }
         },
         {
           id: KEY.excluded,
           name: "Pages to leave out",
-          description: "Prefixes that stay out even when a parent is sent.",
+          description: "Prefixes that stay out even when a parent is sent. A block reference to a block on one of these pages is left out of the sent text too.",
           action: { type: "input", placeholder: "Docs/Drafts" }
         },
         {
           id: KEY.journals,
           name: "Send daily notes",
-          description: "Daily notes are usually private, so they stay out unless you turn this on.",
+          description: "Daily notes are usually private, so they stay out unless you turn this on. While it is off, a block reference to a daily note is left out of the sent text too.",
           action: { type: "switch" }
         },
         {
@@ -1063,7 +1107,7 @@ async function onload({ extensionAPI }) {
         {
           id: KEY.origin,
           name: "Asyntai address",
-          description: "Leave this as it is unless Asyntai support asks you to change it.",
+          description: "Leave this as it is unless Asyntai support asks you to change it. Must start with https://.",
           action: { type: "input", placeholder: DEFAULT_ORIGIN }
         }
       ]
@@ -1080,6 +1124,7 @@ async function onload({ extensionAPI }) {
     await Promise.resolve(settings.set(MAP_KEY, serializeMap(map)));
   };
   const engine = new SyncEngine(api, graph, parseMap(settings.get(MAP_KEY)), saveMap, options);
+  graph.refFilter = (page) => refAllowed(page, options());
   const style = document.createElement("style");
   style.id = STYLE_ID;
   style.textContent = CSS;
@@ -1160,7 +1205,12 @@ async function onload({ extensionAPI }) {
     bar.appendChild(button);
     return true;
   };
-  const barTimer = setInterval(placeButton, 2e3);
+  const barObserver = new MutationObserver(() => {
+    if (!button.isConnected) {
+      placeButton();
+    }
+  });
+  barObserver.observe(document.body, { childList: true, subtree: true });
   placeButton();
   const pushCurrent = async () => {
     const page = await graph.currentPage();
@@ -1238,6 +1288,7 @@ async function onload({ extensionAPI }) {
     })
   );
   const startedAt = Date.now();
+  const handled = {};
   let busy = false;
   const tick = async () => {
     if (busy || !flag(KEY.autoSync, true) || !text(KEY.apiKey).trim()) {
@@ -1251,17 +1302,21 @@ async function onload({ extensionAPI }) {
       const times = await graph.editTimes();
       const now = Date.now();
       for (const [uid, edited] of Object.entries(times)) {
-        if (edited <= Math.max(engine.sentAt(uid), startedAt) || now - edited < QUIET_MS) {
+        if (edited <= (handled[uid] ?? startedAt) || now - edited < QUIET_MS) {
           continue;
         }
         const page = await graph.page(uid);
         if (!page) {
           continue;
         }
+        let ok = true;
         if (engine.wanted(page)) {
-          await engine.push(page);
+          ok = (await engine.push(page)).ok;
         } else if (engine.isSynced(uid)) {
-          await engine.remove(uid);
+          ok = await engine.remove(uid);
+        }
+        if (ok) {
+          handled[uid] = edited;
         }
       }
       for (const uid of Object.keys(engine.entries())) {
@@ -1279,7 +1334,7 @@ async function onload({ extensionAPI }) {
   runtime = {
     stop: () => {
       clearInterval(watchTimer);
-      clearInterval(barTimer);
+      barObserver.disconnect();
       document.removeEventListener("keydown", onKey);
       button.remove();
       spacer.remove();

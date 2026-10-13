@@ -29,6 +29,20 @@ function el<K extends keyof HTMLElementTagNameMap>(
     return node;
 }
 
+/**
+ * Chat text goes into blocks as plain words. Without this, a visitor who
+ * types [[Page]], #tag, ((uid)), {{embed: ...}} or "Key:: value" would create
+ * pages, references, widgets or attributes in the user's graph.
+ */
+export function plainForRoam(text: string): string {
+    return (text || "")
+        .replace(/\[\[|\]\]/g, (pair) => pair[0])
+        .replace(/\(\(|\)\)/g, (pair) => pair[0])
+        .replace(/\{\{|\}\}/g, (pair) => pair[0])
+        .replace(/(^|[^\w])#(?=[\w[])/g, "$1")
+        .replace(/::/g, ":");
+}
+
 /** "2026-10-11 visitor question", short enough to read in the sidebar. */
 export function chatTitle(session: Session): string {
     const date = (session.first_message_at || session.last_message_at || "").slice(0, 10);
@@ -264,7 +278,7 @@ export class Panel {
         const save = el("button", "asyntai-link", "Save as page");
         save.title = "Saved chats go under Asyntai chats/ and are never sent back to Asyntai.";
         save.addEventListener("click", () => {
-            const lines = messages.map((m) => `${m.role === "user" ? "Visitor" : "Asyntai"}: ${m.content}`);
+            const lines = messages.map((m) => `${m.role === "user" ? "Visitor" : "Asyntai"}: ${plainForRoam(m.content)}`);
             const title = `Asyntai chats/${chatTitle(session)}`;
             void this.hooks.saveAsPage(title, lines.join("\n"));
         });

@@ -51,6 +51,14 @@ export function makeRoam({ now = () => Date.now() } = {}) {
         }
     };
 
+    // Roam stamps :page/edit-time on the page for any change on it,
+    // deletions and moves included.
+    const touch = (pageE, time) => {
+        if (pageE != null) {
+            transact([{ ":db/id": pageE, ":page/edit-time": time }]);
+        }
+    };
+
     const entityId = (uid) => d.q('[:find ?e . :in $ ?u :where [?e ":block/uid" ?u]]', db, uid);
 
     const pageOf = (uid) => {
@@ -58,11 +66,12 @@ export function makeRoam({ now = () => Date.now() } = {}) {
         if (e == null) {
             return null;
         }
-        const ent = d.pull(db, '[":node/title" {":block/page" [":db/id"]}]', e);
-        if (ent && ent[":node/title"] !== undefined) {
+        // Queried, not pulled: a string ":db/id" in a pull pattern is not the
+        // special :db/id key, so the old pull returned null for every block.
+        if (d.q('[:find ?t . :in $ ?e :where [?e ":node/title" ?t]]', db, e) != null) {
             return e;
         }
-        return ent && ent[":block/page"] ? ent[":block/page"][":db/id"] : null;
+        return d.q('[:find ?p . :in $ ?e :where [?e ":block/page" ?p]]', db, e) ?? null;
     };
 
     const alpha = {
@@ -91,15 +100,25 @@ export function makeRoam({ now = () => Date.now() } = {}) {
                         },
                         { ":db/id": parent, ":block/children": [-1] },
                     ]);
+                    touch(pageOf(location["parent-uid"]), now());
                     state.created.push({ parent: location["parent-uid"], order, string: block.string, uid });
                 },
                 update: async ({ block }) => {
                     transact([{ ":block/uid": block.uid, ":block/string": block.string, ":edit/time": now() }]);
+                    touch(pageOf(block.uid), now());
                 },
             },
             page: {
                 create: async ({ page }) => {
-                    transact([{ ":block/uid": page.uid || alpha.util.generateUID(), ":node/title": page.title, ":edit/time": now() }]);
+                    const t = now();
+                    transact([
+                        {
+                            ":block/uid": page.uid || alpha.util.generateUID(),
+                            ":node/title": page.title,
+                            ":edit/time": t,
+                            ":page/edit-time": t,
+                        },
+                    ]);
                 },
                 delete: async ({ page }) => {
                     const e = entityId(page.uid);
@@ -123,7 +142,7 @@ export function makeRoam({ now = () => Date.now() } = {}) {
     // Helpers for tests: build pages from nested arrays.
     //   addPage("Docs/Refund", "pg1", ["line", ["parent", ["child"]]], 1000)
     const addPage = (title, uid, blocks, time = now()) => {
-        transact([{ ":block/uid": uid, ":node/title": title, ":edit/time": time }]);
+        transact([{ ":block/uid": uid, ":node/title": title, ":edit/time": time, ":page/edit-time": time }]);
         const pageE = entityId(uid);
         const addBlocks = (parentE, items) => {
             items.forEach((item, order) => {
@@ -151,11 +170,20 @@ export function makeRoam({ now = () => Date.now() } = {}) {
 
     const editBlock = (uid, string, time = now()) => {
         transact([{ ":block/uid": uid, ":block/string": string, ":edit/time": time }]);
+        touch(pageOf(uid), time);
+    };
+
+    // Deleting a block takes its own :edit/time with it; only the page
+    // stamp shows that something changed.
+    const deleteBlock = (uid, time = now()) => {
+        const pageE = pageOf(uid);
+        transact([[":db.fn/retractEntity", entityId(uid)]]);
+        touch(pageE, time);
     };
 
     const renamePage = (uid, title, time = now()) => {
-        transact([{ ":block/uid": uid, ":node/title": title, ":edit/time": time }]);
+        transact([{ ":block/uid": uid, ":node/title": title, ":edit/time": time, ":page/edit-time": time }]);
     };
 
-    return { alpha, state, addPage, editBlock, renamePage, db: () => db };
+    return { alpha, state, addPage, editBlock, deleteBlock, renamePage, db: () => db };
 }
